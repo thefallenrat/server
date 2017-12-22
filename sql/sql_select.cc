@@ -657,9 +657,6 @@ setup_without_group(THD *thd, Ref_ptr_array ref_pointer_array,
   res= res || setup_group(thd, ref_pointer_array, tables, fields, all_fields,
                           group, hidden_group_fields);
   thd->lex->current_select->context_analysis_place= save_place;
-  thd->lex->allow_sum_func|= (nesting_map)1 << select->nest_level;
-  res= res || setup_windows(thd, ref_pointer_array, tables, fields, all_fields,
-                            win_specs, win_funcs);
   thd->lex->allow_sum_func= save_allow_sum_func;
   DBUG_RETURN(res);
 }
@@ -857,6 +854,23 @@ JOIN::prepare(TABLE_LIST *tables_init,
       my_error(ER_WRONG_PLACEMENT_OF_WINDOW_FUNCTION, MYF(0));
       DBUG_RETURN(-1); 
     }
+  }
+
+  /*
+     We setup window functions last, so as to guarantee that all items have
+     been fixed before.
+  */
+  if (select_lex->window_funcs.elements ||
+      select_lex->window_specs.elements)
+  {
+    nesting_map save_allow_sum_func= thd->lex->allow_sum_func;
+    thd->lex->allow_sum_func|=
+      (nesting_map)1 << thd->lex->current_select->nest_level;
+    if (setup_windows(thd, ref_ptrs, tables_list, fields_list,
+                      all_fields, select_lex->window_specs,
+                      select_lex->window_funcs))
+      DBUG_RETURN(-1);
+    thd->lex->allow_sum_func= save_allow_sum_func;
   }
 
   With_clause *with_clause=select_lex->get_with_clause();

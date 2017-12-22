@@ -3289,3 +3289,11 @@ SELECT id, window
 FROM door as window;
 ERROR 42000: You have an error in your SQL syntax; check the manual that corresponds to your MariaDB server version for the right syntax to use near 'window' at line 2
 DROP TABLE door;
+#
+# MDEV-13683: crash in Item_window_func::update_used_tables
+#
+create table t (a int);
+select a from t
+having ntile(1) over w1;
+ERROR HY000: Window function is allowed only in SELECT list and ORDER BY clause
+drop table t;

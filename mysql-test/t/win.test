@@ -2057,3 +2057,13 @@ SELECT id, window
 FROM door as window;
 
 DROP TABLE door;
+
+--echo #
+--echo # MDEV-13683: crash in Item_window_func::update_used_tables
+--echo #
+
+create table t (a int);
+--error ER_WRONG_PLACEMENT_OF_WINDOW_FUNCTION
+select a from t
+having ntile(1) over w1;
+drop table t;
