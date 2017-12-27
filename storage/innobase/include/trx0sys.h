@@ -793,15 +793,6 @@ public:
 					transactions that have not yet been
 					started in InnoDB. */
 
-	trx_ids_t	rw_trx_ids;	/*!< Array of Read write transaction IDs
-					for MVCC snapshot. A ReadView would take
-					a snapshot of these transactions whose
-					changes are not visible to it. We should
-					remove transactions from the list before
-					committing in memory and releasing locks
-					to ensure right order of removal and
-					consistent snapshot. */
-
 	/** Avoid false sharing */
 	char	pad3[CACHE_LINE_SIZE];
 	/** Temporary rollback segments */
@@ -884,18 +875,25 @@ public:
     @return new, allocated trx id
   */
 
-  trx_id_t get_new_trx_id()
+  trx_id_t get_new_trx_id(bool locked= false)
   {
-    ut_ad(mutex_own(&trx_sys->mutex));
     trx_id_t id= static_cast<trx_id_t>(my_atomic_add64_explicit(
       reinterpret_cast<int64*>(&m_max_trx_id), 1, MY_MEMORY_ORDER_RELAXED));
 
     if (!(id % TRX_SYS_TRX_ID_WRITE_MARGIN) && !srv_read_only_mode)
     {
-      mtr_t mtr;
-      mtr_start(&mtr);
-      mlog_write_ull(trx_sysf_get(&mtr) + TRX_SYS_TRX_ID_STORE, id, &mtr);
-      mtr_commit(&mtr);
+      if (!locked)
+        mutex_enter(&trx_sys->mutex);
+      if (id / TRX_SYS_TRX_ID_WRITE_MARGIN ==
+          get_max_trx_id() / TRX_SYS_TRX_ID_WRITE_MARGIN)
+      {
+        mtr_t mtr;
+        mtr_start(&mtr);
+        mlog_write_ull(trx_sysf_get(&mtr) + TRX_SYS_TRX_ID_STORE, id, &mtr);
+        mtr_commit(&mtr);
+      }
+      if (!locked)
+        mutex_exit(&trx_sys->mutex);
     }
     return(id);
   }
@@ -907,12 +905,42 @@ public:
   }
 
 
+  void snapshot_ids(trx_t *caller_trx, trx_ids_t *ids)
+  {
+    snapshot_ids_arg arg= { ids, caller_trx ? caller_trx->id : 0 };
+
+//    ut_ad(!ids->size());
+    ids->clear(); // why the heck purge_sys->view didn't clear it?
+    ids->reserve(rw_trx_hash.size() + 32);
+    rw_trx_hash.iterate(caller_trx,
+                        reinterpret_cast<my_hash_walk_action>(copy_one_id),
+                        &arg);
+    std::sort(ids->begin(), ids->end());
+  }
+
+
 private:
   static my_bool get_min_trx_id_callback(rw_trx_hash_element_t *element,
                                          trx_id_t *id)
   {
     if (element->id < *id)
       *id= element->id;
+    return 0;
+  }
+
+
+  struct snapshot_ids_arg
+  {
+    trx_ids_t *ids;
+    trx_id_t exclude_id;
+  };
+
+
+  static my_bool copy_one_id(rw_trx_hash_element_t *element,
+                             snapshot_ids_arg *arg)
+  {
+    if (element->id != arg->exclude_id)
+      arg->ids->push_back(element->id);
     return 0;
   }
 };

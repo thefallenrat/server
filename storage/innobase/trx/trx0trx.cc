@@ -965,7 +965,6 @@ static inline void trx_sys_add_trx_at_init(trx_t *trx, trx_undo_t *undo,
   {
     trx_sys->rw_trx_hash.insert(trx);
     trx_sys->rw_trx_hash.put_pins(trx);
-    trx_sys->rw_trx_ids.push_back(trx->id);
     trx_resurrect_table_locks(trx, undo);
     if (trx_state_eq(trx, TRX_STATE_ACTIVE))
       *rows_to_undo += trx->undo_no;
@@ -1064,8 +1063,6 @@ trx_lists_init_at_db_start()
 
 		ib::info() << "Trx id counter is " << trx_sys->get_max_trx_id();
 	}
-
-	std::sort(trx_sys->rw_trx_ids.begin(), trx_sys->rw_trx_ids.end());
 }
 
 /** Assign a persistent rollback segment in a round-robin fashion,
@@ -1181,10 +1178,7 @@ trx_t::assign_temp_rseg()
 	rsegs.m_noredo.rseg = rseg;
 
 	if (id == 0) {
-		mutex_enter(&trx_sys->mutex);
 		id = trx_sys->get_new_trx_id();
-		trx_sys->rw_trx_ids.push_back(id);
-		mutex_exit(&trx_sys->mutex);
 		trx_sys->rw_trx_hash.insert(this);
 	}
 
@@ -1269,28 +1263,22 @@ trx_start_low(
 	    && (trx->mysql_thd == 0 || read_write || trx->ddl)) {
 
 		trx->rsegs.m_redo.rseg = trx_assign_rseg_low();
-
-		/* Temporary rseg is assigned only if the transaction
-		updates a temporary table */
-
-		trx_sys_mutex_enter();
-
-		trx->id = trx_sys->get_new_trx_id();
-
-		trx_sys->rw_trx_ids.push_back(trx->id);
-
 		ut_ad(trx->rsegs.m_redo.rseg != 0
 		      || srv_read_only_mode
 		      || srv_force_recovery >= SRV_FORCE_NO_TRX_UNDO);
 
-		ut_d(trx->in_rw_trx_list = true);
+		/* Temporary rseg is assigned only if the transaction
+		updates a temporary table */
+
+		trx->id = trx_sys->get_new_trx_id();
 #ifdef UNIV_DEBUG
+		trx_sys_mutex_enter();
+		trx->in_rw_trx_list = true;
 		if (trx->id > trx_sys->rw_max_trx_id) {
 			trx_sys->rw_max_trx_id = trx->id;
 		}
-#endif /* UNIV_DEBUG */
-
 		trx_sys_mutex_exit();
+#endif /* UNIV_DEBUG */
 		trx_sys->rw_trx_hash.insert(trx);
 
 	} else {
@@ -1303,16 +1291,8 @@ trx_start_low(
 			to write to the temporary table. */
 
 			if (read_write) {
-
-				trx_sys_mutex_enter();
-
 				ut_ad(!srv_read_only_mode);
-
 				trx->id = trx_sys->get_new_trx_id();
-
-				trx_sys->rw_trx_ids.push_back(trx->id);
-
-				trx_sys_mutex_exit();
 				trx_sys->rw_trx_hash.insert(trx);
 			}
 		} else {
@@ -1345,7 +1325,7 @@ trx_serialise(trx_t* trx, trx_rseg_t* rseg)
 
 	trx_sys_mutex_enter();
 
-	trx->no = trx_sys->get_new_trx_id();
+	trx->no = trx_sys->get_new_trx_id(true);
 
 	/* Track the minimum serialisation number. */
 	UT_LIST_ADD_LAST(trx_sys->serialisation_list, trx);
@@ -1664,13 +1644,6 @@ trx_erase_lists(
 	if (serialised) {
 		UT_LIST_REMOVE(trx_sys->serialisation_list, trx);
 	}
-
-	trx_ids_t::iterator	it = std::lower_bound(
-		trx_sys->rw_trx_ids.begin(),
-		trx_sys->rw_trx_ids.end(),
-		trx->id);
-	ut_ad(*it == trx->id);
-	trx_sys->rw_trx_ids.erase(it);
 	trx_sys_mutex_exit();
 	trx_sys->rw_trx_hash.erase(trx);
 }
@@ -3013,6 +2986,7 @@ trx_set_rw_mode(
 	ut_ad(!trx->in_rw_trx_list);
 	ut_ad(!trx_is_autocommit_non_locking(trx));
 	ut_ad(!trx->read_only);
+	ut_ad(trx->id == 0);
 
 	if (high_level_read_only) {
 		return;
@@ -3029,27 +3003,23 @@ trx_set_rw_mode(
 
 	ut_ad(trx->rsegs.m_redo.rseg != 0);
 
-	mutex_enter(&trx_sys->mutex);
-
-	ut_ad(trx->id == 0);
 	trx->id = trx_sys->get_new_trx_id();
-
-	trx_sys->rw_trx_ids.push_back(trx->id);
 
 	/* So that we can see our own changes. */
 	if (MVCC::is_view_active(trx->read_view)) {
+		mutex_enter(&trx_sys->mutex);
 		MVCC::set_view_creator_trx_id(trx->read_view, trx->id);
+		mutex_exit(&trx_sys->mutex);
 	}
 
 #ifdef UNIV_DEBUG
+	mutex_enter(&trx_sys->mutex);
+	trx->in_rw_trx_list = true;
 	if (trx->id > trx_sys->rw_max_trx_id) {
 		trx_sys->rw_max_trx_id = trx->id;
 	}
-#endif /* UNIV_DEBUG */
-
-	ut_d(trx->in_rw_trx_list = true);
-
 	mutex_exit(&trx_sys->mutex);
+#endif /* UNIV_DEBUG */
 	trx_sys->rw_trx_hash.insert(trx);
 }
 
